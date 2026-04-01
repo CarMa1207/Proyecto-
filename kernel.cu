@@ -382,6 +382,54 @@ __global__ void kernelFase03_Intermedia(int* d_data, int num_vuelos, int* d_res,
     }
 }
 
+// Kernel Fase 03 - Variante 3.4: Patron de Reduccion Optimizada
+__global__ void kernelFase03_Reduccion(int* d_in, int n, int* d_out, bool buscarMaximo) {
+    extern __shared__ int s_data[]; // Pizarra dinámica
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int NULO;
+    if (buscarMaximo)
+        NULO = INT_MIN;
+    else
+        NULO = INT_MAX;
+
+    if (idx < n)
+        s_data[tid] = d_in[idx];
+    else
+        s_data[tid] = NULO;
+
+
+    __syncthreads();
+
+    // 2. Reducción en Árbol Optimizada (Evitando divergencia de warps)
+    // El tamaño del salto 's' se divide a la mitad en cada ronda
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            int mi_valor = s_data[tid];
+            int rival = s_data[tid + s];
+
+            if (buscarMaximo) {
+                if (rival != NULO && rival > mi_valor) {
+                    s_data[tid] = rival;
+                }
+            }
+            else {
+                if (rival != NULO && rival < mi_valor) {
+                    s_data[tid] = rival;
+                }
+            }
+        }
+        __syncthreads(); // Esperamos a que termine esta ronda del torneo
+    }
+
+    // 3. El Hilo 0 de cada bloque anota al Campeón del bloque en la memoria global
+    if (tid == 0) {
+        d_out[blockIdx.x] = s_data[0];
+    }
+}
+
 
 
 
@@ -720,6 +768,67 @@ int main() {
                 size_t sharedMemBytes = (hilosPorBloque + 2) * sizeof(int);
                 cout << "[Variante 3.3] Lanzando reduccion por pares con " << sharedMemBytes << " bytes/bloque.\n";
                 kernelFase03_Intermedia << <bloquesPorGrid, hilosPorBloque, sharedMemBytes >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            }
+            else if (variante == 4) {
+                // Variante 3.4: Reducciones Sucesivas
+                int N_actual = num_vuelos;
+                int N_bloques = bloquesPorGrid;
+
+                // Memoria para el torneo
+                int* d_in_torneo;
+                int* d_out_torneo;
+                cudaMalloc(&d_in_torneo, N_actual * sizeof(int));
+                cudaMalloc(&d_out_torneo, N_bloques * sizeof(int));
+
+                // Copiamos los datos originales a la arena de entrada
+                cudaMemcpy(d_in_torneo, d_data, N_actual * sizeof(int), cudaMemcpyDeviceToDevice);
+
+                int rondas = 1;
+                while (true) {
+                    size_t sharedMemBytes = hilosPorBloque * sizeof(int); // Ahora no hay halos
+                    cout << "[Ronda " << rondas << "] Entran " << N_actual << " vuelos. Se generan " << N_bloques << " bloques.\n";
+
+                    kernelFase03_Reduccion << <N_bloques, hilosPorBloque, sharedMemBytes >> > (d_in_torneo, N_actual, d_out_torneo, buscarMaximo);
+                    cudaDeviceSynchronize();
+
+                    // Si ya quedan 10 campeones o menos, terminamos el bucle de la GPU
+                    if (N_bloques <= 10)
+                    {
+                        break;
+                    }
+
+                    // Si quedan más de 10, preparamos la SIGUIENTE RONDA
+                    N_actual = N_bloques;
+                    N_bloques = (N_actual + hilosPorBloque - 1) / hilosPorBloque;
+
+                    // Los campeones de hoy (d_out) son los contendientes de mañana (d_in)
+                    cudaMemcpy(d_in_torneo, d_out_torneo, N_actual * sizeof(int), cudaMemcpyDeviceToDevice);
+                    rondas++;
+                }
+
+                // --- POST-PROCESADO EN CPU ---
+                // Rescatamos los campeones finales (máximo 10)
+                vector<int> campeones_finales(N_bloques);
+                cudaMemcpy(campeones_finales.data(), d_out_torneo, N_bloques * sizeof(int), cudaMemcpyDeviceToHost);
+
+                cout << "\n[CPU] Rescatados " << N_bloques << " resultados finales. Resolviendo en CPU...\n";
+
+                // Iteramos en la CPU para el ganador absoluto
+                int ganador_absoluto = campeones_finales[0];
+                for (int i = 1; i < N_bloques; i++) {
+                    if (buscarMaximo) {
+                        if (campeones_finales[i] > ganador_absoluto) ganador_absoluto = campeones_finales[i];
+                    }
+                    else {
+                        if (campeones_finales[i] < ganador_absoluto) ganador_absoluto = campeones_finales[i];
+                    }
+                }
+
+                // Sobrescribimos la variable de resultado para que se imprima al final
+                cudaMemcpy(d_res, &ganador_absoluto, sizeof(int), cudaMemcpyHostToDevice);
+
+                cudaFree(d_in_torneo);
+                cudaFree(d_out_torneo);
             }
             else {
                 cout << "\n[Aviso] Variante no implementada aun.\n";
