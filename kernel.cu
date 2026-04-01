@@ -347,21 +347,15 @@ __global__ void kernelFase03_Intermedia(int* d_data, int num_vuelos, int* d_res,
         }
     }
 
-    // BARRERA: Esperamos a que todos hayan leido antes de sobrescribir
     __syncthreads();
 
-    // --- FASE 3: Sobrescribir en shared_data ---
-    // Volvemos a usar tid + 1 para mantener la coherencia de indices
     shared_data[tid + 1] = local_mejor;
-
-    // BARRERA: Esperamos a que todos hayan escrito la nueva informacion
+   
     __syncthreads();
 
-    // --- FASE 4: Solo hilos pares comparan y atacan la global ---
     if (idx < num_vuelos && tid % 2 == 0) {
         int mi_valor = shared_data[tid + 1];
 
-        // Controlamos no leer fuera del bloque al mirar al vecino impar
         int valor_siguiente = NULO;
         if (idx + 1 < num_vuelos && (tid + 1) < blockDim.x) {
             valor_siguiente = shared_data[tid + 2];
@@ -662,7 +656,7 @@ int main() {
             }
 
             int variante;
-            cout << "Seleccione Variante (1=Simple, 2=Basica): ";
+            cout << "Seleccione Variante (1=Simple, 2=Basica , 3=Intermedio): ";
             cin >> variante;
 
             // 4. Truncado de float a int (Exigencia del enunciado)
@@ -720,6 +714,12 @@ int main() {
 
                 // ¡Fíjate en el TERCER parámetro dentro de los corchetes!
                 kernelFase03_Basica << <bloquesPorGrid, hilosPorBloque, sharedMemBytes >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            }
+            else if (variante == 3) {
+                // Variante 3.3: Misma reserva de memoria porque empezamos con la ventana de 3
+                size_t sharedMemBytes = (hilosPorBloque + 2) * sizeof(int);
+                cout << "[Variante 3.3] Lanzando reduccion por pares con " << sharedMemBytes << " bytes/bloque.\n";
+                kernelFase03_Intermedia << <bloquesPorGrid, hilosPorBloque, sharedMemBytes >> > (d_data, num_vuelos, d_res, buscarMaximo);
             }
             else {
                 cout << "\n[Aviso] Variante no implementada aun.\n";
