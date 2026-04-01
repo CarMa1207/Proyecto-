@@ -181,6 +181,103 @@ __global__ void kernelFase02(
     }
 }
 
+__global__ void kernelFase03_Simple(int* d_data, int num_vuelos, int* d_res, bool buscarMaximo) {
+
+       int id = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (id < num_vuelos) {
+
+            int llave = d_data[id];
+
+            if (buscarMaximo) {
+                if (llave != INT_MIN) {
+                    atomicMax(d_res, llave);
+
+                }
+            else {
+                    if (llave != INT_MAX) {
+                        atomicMin(d_res, llave);
+                    }
+                }
+            }
+
+        }
+
+
+}
+
+__global__ void kernelFase03_Basica(int* d_data, int num_vuelos, int* d_res, bool buscarMaximo) {
+    extern __shared__ int shared_data[];
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int NULO;
+    if (buscarMaximo)
+        NULO = INT_MIN;
+    else
+        NULO = INT_MAX;
+
+    if (idx < num_vuelos) {
+        shared_data[tid + 1] = d_data[idx];
+    }
+    else {
+        shared_data[tid + 1] = NULO;
+    }
+    if (tid == 0) {
+        if (idx > 0) {
+            shared_data[0] = d_data[idx - 1];
+        }
+        else {
+            shared_data[0] = NULO;
+        }
+    }
+
+    if (tid == blockDim.x - 1) {
+        if (idx < num_vuelos - 1) {
+            shared_data[blockDim.x + 1] = d_data[idx + 1];
+        }
+        else {
+            shared_data[blockDim.x + 1] = NULO;
+        }
+    }
+
+    __syncthreads();
+
+    // Guarda: solo actuar si el dato propio es valido
+    if (idx < num_vuelos && shared_data[tid + 1] != NULO)
+    {
+        int anterior = shared_data[tid];
+        int actual = shared_data[tid + 1];
+        int posterior = shared_data[tid + 2];
+        int mejor = actual;
+
+        if (buscarMaximo) {
+            if (anterior != NULO && anterior > mejor) {
+                mejor = anterior;
+            }
+            if (posterior != NULO && posterior > mejor) {
+                mejor = posterior;
+            }
+            if (mejor != NULO) {
+                atomicMax(d_res, mejor);
+            }
+        }
+        else {
+            if (anterior != NULO && anterior < mejor) {
+                mejor = anterior;
+            }
+            if (posterior != NULO && posterior < mejor) {
+                mejor = posterior;
+            }
+            if (mejor != NULO) {
+                atomicMin(d_res, mejor);
+            }
+        }
+    }
+}
+
+
 
 
 int main() {
@@ -258,7 +355,7 @@ int main() {
 
             int num_vuelos = dataset.arr_delay.size();
 
-            cout << "\nNumero de vuelos a analizar: " << num_vuelos << endl;
+            cout << "\nNumero de vuelos: " << num_vuelos << endl;
 
             // ============================================
             // convertir vector<string> tail_num a array char linealizado
@@ -324,6 +421,9 @@ int main() {
             cudaGetDeviceProperties(&prop, 0);
 
             int hilosPorBloque = prop.maxThreadsPerBlock;
+            if (hilosPorBloque > 256) {
+                hilosPorBloque = 256;
+            }
 
             int bloquesPorGrid =
                 (num_vuelos + hilosPorBloque - 1) / hilosPorBloque;
@@ -408,13 +508,112 @@ int main() {
             break;
         }
         case '3':
-            cout << "\n--- Iniciando Fase 03: Reduccion de retraso ---\n";
-            // TODO: Mostrar submenú y lanzar Kernel de la Fase 3
-            break;
+        {
+            cout << "\n--- Iniciando Fase 03 (Variante 3.1): Reduccion Simple ---\n";
+
+            int columna_opcion;
+            do {
+                cout << "Seleccione la columna:\n (1) DEP_DELAY\n (2) ARR_DELAY\n (3) WEATHER_DELAY\n Opcion: ";
+                cin >> columna_opcion;
+
+                if (columna_opcion < 1 || columna_opcion > 3)
+                    cout << "Opcion no valida, intentelo de nuevo.\n";
+
+            } while (columna_opcion < 1 || columna_opcion > 3);
+
+            // 2. Menú de Operación
+            int tipo_opcion;
+            do {
+                cout << "Busqueda:\n (1) Maximo\n (2) Minimo\n Opcion: ";
+                cin >> tipo_opcion;
+
+                if (tipo_opcion != 1 && tipo_opcion != 2)
+                    cout << "Opcion no valida, intentelo de nuevo.\n";
+
+            } while (tipo_opcion != 1 && tipo_opcion != 2);
+
+            bool buscarMaximo;
+            if (tipo_opcion == 1)
+                buscarMaximo = true;
+            else
+                buscarMaximo = false;
+
+            // 3. Selección del origen de datos
+            vector<float>* columna_origen;
+            if (columna_opcion == 1) {
+                columna_origen = &dataset.dep_delay;
+            }
+            else if (columna_opcion == 2) {
+                columna_origen = &dataset.arr_delay;
+            }
+            else {
+                columna_origen = &dataset.weather_delay;
+            }
+
+            // 4. Truncado de float a int (Exigencia del enunciado)
+            int num_vuelos = (*columna_origen).size();
+            vector<int> datos_int(num_vuelos);
+
+            // Usamos un valor trampa para los datos corruptos
+            int nulo_val = buscarMaximo ? INT_MIN : INT_MAX;
+
+            for (int i = 0; i < num_vuelos; i++) {
+                float val_f = (*columna_origen)[i];
+                if (isnan(val_f)) {
+                    datos_int[i] = nulo_val; // Dato corrupto, se ignora luego
+                }
+                else {
+                    datos_int[i] = (int)val_f; // Casteo: Trunca los decimales automáticamente
+                }
+            }
+
+            // 5. Comprobación de Hardware 
+            cudaDeviceProp props;
+            cudaGetDeviceProperties(&props, 0);
+            int hilosPorBloque = props.maxThreadsPerBlock;
+            if (hilosPorBloque > 256) {
+                hilosPorBloque = 256;
+            }
+            int bloquesPorGrid = (num_vuelos + hilosPorBloque - 1) / hilosPorBloque;
+            cout << "\n[Hardware] Tarjeta: " << props.name << endl;
+
+
+            // 6. Preparar Memoria VRAM
+            size_t bytes_datos = num_vuelos * sizeof(int);
+            int* d_data;
+            int* d_res;
+
+            cudaMalloc(&d_data, bytes_datos);
+            cudaMalloc(&d_res, sizeof(int));
+
+            cudaMemcpy(d_data, datos_int.data(), bytes_datos, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_res, &nulo_val, sizeof(int), cudaMemcpyHostToDevice); // Inicializamos el resultado al peor caso
+
+            // 7. Lanzar Kernel
+            cout << "Procesando...\n";
+            kernelFase03_Simple << <bloquesPorGrid, hilosPorBloque >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            cudaDeviceSynchronize();
+
+            // 8. Traer resultado y mostrar
+            int resultado_final;
+            cudaMemcpy(&resultado_final, d_res, sizeof(int), cudaMemcpyDeviceToHost);
+
+            cout << "\n=======================================\n";
+            cout << ">>> EL RESULTADO " << (buscarMaximo ? "MAXIMO" : "MINIMO") << " ES: " << resultado_final << " minutos <<<";
+            cout << "\n=======================================\n";
+
+            // 9. Limpiar
+            cudaFree(d_data);
+            cudaFree(d_res);
+            break; 
+        }
         case '4':
+        {
             cout << "\n--- Iniciando Fase 04: Histograma de aeropuertos ---\n";
             // TODO: Mostrar submenú y lanzar Kernel de la Fase 4
             break;
+        }
+
         case 'x':
             cout << "\nSaliendo del programa...\n";
             break;
