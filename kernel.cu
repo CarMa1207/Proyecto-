@@ -99,14 +99,18 @@ bool cargarDatosCSV(const string& ruta, AirlineDataset& dataset) {
 
 
 int main() {
-    string rutaCSV;
+    string rutaCSV = "C:\\Users\\carlos.martinezarias\\Documents\\Airline_dataset.csv";
     cout << "PAP 2026 - PL1 CUDA" << endl;
+   /*
+    
     cout << "Introduzca la ruta base del dataset (pulse Intro para usar por defecto: C:\\dataset.csv): ";
 
     getline(cin, rutaCSV);
     if (rutaCSV.empty()) {
         rutaCSV = "C:\\dataset.csv"; // Ruta por defecto sugerida en el enunciado
     }
+
+    */
 
     cout << "\nCargando dataset desde: " << rutaCSV << " ..." << endl;
     AirlineDataset dataset;
