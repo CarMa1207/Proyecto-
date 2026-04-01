@@ -13,9 +13,7 @@
 #include <sstream>
 #include <cmath>
 #include <unordered_map>
-
 #include <limits.h>
-
 
 using namespace std;
 
@@ -105,22 +103,79 @@ bool cargarDatosCSV(const string& ruta, AirlineDataset& dataset) {
 
 // Kernel Fase 01: Detección de retrasos en despegues (DEP_DELAY)
 __global__ void kernelFase01(float* d_retrasos_despegue, int num_vuelos, int umbral_usuario) {
-    // 1. Calculamos la posición exacta (índice 1D) de este hilo
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // 2. Comprobamos que no nos salimos del tamaño del vector
-    if (idx < num_vuelos) {
-        float retraso_vuelo = d_retrasos_despegue[idx];
+ 
+    if (id < num_vuelos) {
+        float retraso_vuelo = d_retrasos_despegue[id];
 
-        // 3. Ignoramos los valores nulos/vacíos (NAN)
+        //  Ignoramos los valores nulos/vacíos (NAN)
         if (!isnan(retraso_vuelo)) {
-            // Evaluamos si es un retraso (umbral positivo)
+        
             if (umbral_usuario >= 0 && retraso_vuelo >= umbral_usuario) {
-                printf("- Hilo #%d: Retraso de %.0f minutos\n", idx, retraso_vuelo);
+                printf("- Hilo #%d: Retraso de %.0f minutos\n", id, retraso_vuelo);
             }
-            // Evaluamos si es un adelanto (umbral negativo)
             else if (umbral_usuario < 0 && retraso_vuelo <= umbral_usuario) {
-                printf("Hilo #%d: Adelanto de %.0f minutos\n", idx, retraso_vuelo);
+                printf("Hilo #%d: Adelanto de %.0f minutos\n", id, retraso_vuelo);
+            }
+        }
+    }
+}
+
+// FASE 02
+// memoria constante para el umbral
+__constant__ int d_umbral;
+
+
+// Kernel CUDA Fase 02
+__global__ void kernelFase02(
+    float* d_retraso_despegue,
+    char* d_tail_nums,
+    int num_vuelos,
+    int* d_contador,
+    float* d_result_retrasos,
+    char* d_result_tail
+)
+{
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (id < num_vuelos)
+    {
+        float retraso = d_retraso_despegue[id];
+
+        if (!isnan(retraso))
+        {
+            bool cumple = false;
+
+            // caso retraso
+            if (d_umbral >= 0 && retraso >= d_umbral)
+                cumple = true;
+
+            // caso adelanto
+            if (d_umbral < 0 && retraso <= d_umbral)
+                cumple = true;
+
+            if (cumple)
+            {
+                // posicion segura en array resultado
+                int pos = atomicAdd(d_contador, 1);
+
+                d_result_retrasos[pos] = retraso;
+
+                // copiar matrícula (8 chars máximo)
+                for (int j = 0; j < 8; j++)
+                {
+                    d_result_tail[pos * 8 + j] =
+                        d_tail_nums[id * 8 + j];
+                }
+
+                printf(
+                    "- Hilo #%d | Matricula: %.8s | Retraso (llegada): %.0f min\n",
+                    id,
+                    &d_tail_nums[id * 8],
+                    retraso
+                );
             }
         }
     }
@@ -131,16 +186,16 @@ __global__ void kernelFase01(float* d_retrasos_despegue, int num_vuelos, int umb
 int main() {
     string rutaCSV = "C:\\Users\\carlos.martinezarias\\Documents\\Airline_dataset.csv";
     cout << "PAP 2026 - PL1 CUDA" << endl;
-   /*
-    
-    cout << "Introduzca la ruta base del dataset (pulse Intro para usar por defecto: C:\\dataset.csv): ";
+    /*
 
-    getline(cin, rutaCSV);
-    if (rutaCSV.empty()) {
-        rutaCSV = "C:\\dataset.csv"; // Ruta por defecto sugerida en el enunciado
-    }
+     cout << "Introduzca la ruta base del dataset (pulse Intro para usar por defecto: C:\\dataset.csv): ";
 
-    */
+     getline(cin, rutaCSV);
+     if (rutaCSV.empty()) {
+         rutaCSV = "C:\\dataset.csv"; // Ruta por defecto sugerida en el enunciado
+     }
+
+     */
 
     cout << "\nCargando dataset desde: " << rutaCSV << " ..." << endl;
     AirlineDataset dataset;
@@ -162,44 +217,196 @@ int main() {
 
         switch (opcion) {
         case '1':
-        {   
+        {
             cout << "\n--- Iniciando Fase 01: Retraso en despegues ---\n";
             int umbral;
-            cout << "Introduzca el umbral en minutos (Positivo = Retraso, Negativo = Adelanto): ";
+            cout << "Introduzca el umbral en minutos (Positivo = Retraso, Negativo = Adelanto) ";
             cin >> umbral;
 
             int num_vuelos = dataset.dep_delay.size();
             size_t bytes = num_vuelos * sizeof(float);
 
-            // 1. Reservar memoria en la tarjeta gráfica (VRAM)
             float* d_dep_delay;
             cudaMalloc(&d_dep_delay, bytes);
 
-            // 2. Transferir los datos de la CPU a la GPU
             cout << "Transfiriendo " << num_vuelos << " registros a la GPU..." << endl;
             cudaMemcpy(d_dep_delay, dataset.dep_delay.data(), bytes, cudaMemcpyHostToDevice);
 
-            // 3. Configurar la topología de la GPU
+            
             int hilosPorBloque = 256;
             int bloquesPorGrid = (num_vuelos + hilosPorBloque - 1) / hilosPorBloque;
 
-            cout << "Lanzando Kernel: " << bloquesPorGrid << " bloques de " << hilosPorBloque << " hilos...\n\n";
+            cout << "Lanzando Kernel: " << bloquesPorGrid << " bloques de " << hilosPorBloque << " hilos\n\n";
 
-            // 4. Ejecución masiva en paralelo
-            kernelFase01<<<bloquesPorGrid, hilosPorBloque>>>(d_dep_delay, num_vuelos, umbral);
+           
+            kernelFase01 << <bloquesPorGrid, hilosPorBloque >> > (d_dep_delay, num_vuelos, umbral);
 
-            // 5. La CPU espera a que la gráfica termine de imprimir todo
+            
             cudaDeviceSynchronize();
 
-            // 6. Limpiar la memoria gráfica
+         
             cudaFree(d_dep_delay);
-            cout << "\nFase 01 completada.\n";
             break;
-        }   
+        }
         case '2':
+        {
             cout << "\n--- Iniciando Fase 02: Retraso en aterrizajes ---\n";
-            // TODO: Pedir umbral y lanzar Kernel de la Fase 2
+
+            int umbral;
+            cout << "Introduzca el umbral en minutos (positivo=retraso, negativo=adelanto): ";
+            cin >> umbral;
+
+            int num_vuelos = dataset.arr_delay.size();
+
+            cout << "\nNumero de vuelos a analizar: " << num_vuelos << endl;
+
+            // ============================================
+            // convertir vector<string> tail_num a array char linealizado
+            // ============================================
+
+            const int MAX_TAIL = 8;
+
+            vector<char> tail_nums_lineal(num_vuelos * MAX_TAIL);
+
+            for (int i = 0; i < num_vuelos; i++)
+            {
+                string matricula = dataset.tail_num[i];
+
+                for (int j = 0; j < MAX_TAIL; j++)
+                {
+                    if (j < matricula.size())
+                        tail_nums_lineal[i * MAX_TAIL + j] = matricula[j];
+                    else
+                        tail_nums_lineal[i * MAX_TAIL + j] = '\0';
+                }
+            }
+
+
+            float* d_arr_delay;
+            char* d_tail_nums;
+
+            cudaMalloc(&d_arr_delay, num_vuelos * sizeof(float));
+            cudaMalloc(&d_tail_nums, num_vuelos * MAX_TAIL);
+
+            cudaMemcpy(
+                d_arr_delay,
+                dataset.arr_delay.data(),
+                num_vuelos * sizeof(float),
+                cudaMemcpyHostToDevice
+            );
+
+            cudaMemcpy(
+                d_tail_nums,
+                tail_nums_lineal.data(),
+                num_vuelos * MAX_TAIL,
+                cudaMemcpyHostToDevice
+            );
+
+            cudaMemcpyToSymbol(
+                d_umbral,
+                &umbral,
+                sizeof(int)
+            );
+
+            float* d_result_delays;
+            char* d_result_tail;
+            int* d_contador;
+
+            cudaMalloc(&d_result_delays, num_vuelos * sizeof(float));
+            cudaMalloc(&d_result_tail, num_vuelos * MAX_TAIL);
+            cudaMalloc(&d_contador, sizeof(int));
+
+            cudaMemset(d_contador, 0, sizeof(int));
+
+            // configuracion GPU dinamica
+
+            cudaDeviceProp prop;
+            cudaGetDeviceProperties(&prop, 0);
+
+            int hilosPorBloque = prop.maxThreadsPerBlock;
+
+            int bloquesPorGrid =
+                (num_vuelos + hilosPorBloque - 1) / hilosPorBloque;
+
+            cout << "\nConfiguracion GPU:\n";
+            cout << "Bloques: " << bloquesPorGrid << endl;
+            cout << "Hilos por bloque: " << hilosPorBloque << endl;
+
+            // ============================================
+            // ejecutar kernel
+            // ============================================
+
+            kernelFase02 <<<bloquesPorGrid, hilosPorBloque >>> (
+                d_arr_delay,
+                d_tail_nums,
+                num_vuelos,
+                d_contador,
+                d_result_delays,
+                d_result_tail
+                );
+
+            cudaDeviceSynchronize();
+
+            // ============================================
+            // recuperar resultados
+            // ============================================
+
+            int total_detectados;
+
+            cudaMemcpy(
+                &total_detectados,
+                d_contador,
+                sizeof(int),
+                cudaMemcpyDeviceToHost
+            );
+
+            vector<float> h_result_delays(total_detectados);
+            vector<char> h_result_tail(total_detectados * MAX_TAIL);
+
+            cudaMemcpy(
+                h_result_delays.data(),
+                d_result_delays,
+                total_detectados * sizeof(float),
+                cudaMemcpyDeviceToHost
+            );
+
+            cudaMemcpy(
+                h_result_tail.data(),
+                d_result_tail,
+                total_detectados * MAX_TAIL,
+                cudaMemcpyDeviceToHost
+            );
+
+            // ============================================
+            // mostrar resumen final
+            // ============================================
+
+            cout << "\nResultados encontrados: " << total_detectados << " vuelos\n";
+
+            for (int i = 0; i < total_detectados && i < 10; i++)
+            {
+                cout
+                    << "Matricula: "
+                    << &h_result_tail[i * MAX_TAIL]
+                    << " Retraso: "
+                    << h_result_delays[i]
+                    << " minutos\n";
+            }
+
+            cout << "\n(se muestran maximo 10 resultados)\n";
+
+            // liberar memoria GPU
+
+            cudaFree(d_arr_delay);
+            cudaFree(d_tail_nums);
+            cudaFree(d_result_delays);
+            cudaFree(d_result_tail);
+            cudaFree(d_contador);
+
+            cout << "\nFase 02 completada.\n";
+
             break;
+        }
         case '3':
             cout << "\n--- Iniciando Fase 03: Reduccion de retraso ---\n";
             // TODO: Mostrar submenú y lanzar Kernel de la Fase 3
