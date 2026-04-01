@@ -14,6 +14,9 @@
 #include <cmath>
 #include <unordered_map>
 
+#include <limits.h>
+
+
 using namespace std;
 
 // Estructura para agrupar las columnas de nuestro dataset
