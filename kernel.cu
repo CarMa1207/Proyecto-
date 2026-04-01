@@ -277,6 +277,117 @@ __global__ void kernelFase03_Basica(int* d_data, int num_vuelos, int* d_res, boo
     }
 }
 
+// Kernel Fase 03 - Variante 3.3: Intermedia (Ventana de 3 + Reduccion de pares)
+__global__ void kernelFase03_Intermedia(int* d_data, int num_vuelos, int* d_res, bool buscarMaximo) {
+    extern __shared__ int shared_data[];
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int NULO;
+    if (buscarMaximo)
+        NULO = INT_MIN;
+    else
+        NULO = INT_MAX;
+
+    // --- FASE 1: Carga de datos y halos en shared_data ---
+    if (idx < num_vuelos) {
+        shared_data[tid + 1] = d_data[idx];
+    }
+    else {
+        shared_data[tid + 1] = NULO;
+    }
+
+    if (tid == 0) {
+        if (idx > 0) {
+            shared_data[0] = d_data[idx - 1];
+        }
+        else {
+            shared_data[0] = NULO;
+        }
+    }
+
+    if (tid == blockDim.x - 1) {
+        if (idx < num_vuelos - 1) {
+            shared_data[blockDim.x + 1] = d_data[idx + 1];
+        }
+        else {
+            shared_data[blockDim.x + 1] = NULO;
+        }
+    }
+
+    __syncthreads();
+
+    // --- FASE 2: Calcular el mejor de la ventana y guardarlo localmente ---
+    int local_mejor = NULO;
+
+    // Guarda: solo actuar si el dato propio es valido
+    if (idx < num_vuelos && shared_data[tid + 1] != NULO)
+    {
+        int anterior = shared_data[tid];
+        int actual = shared_data[tid + 1];
+        int posterior = shared_data[tid + 2];
+        local_mejor = actual;
+
+        if (buscarMaximo) {
+            if (anterior != NULO && anterior > local_mejor) {
+                local_mejor = anterior;
+            }
+            if (posterior != NULO && posterior > local_mejor) {
+                local_mejor = posterior;
+            }
+        }
+        else {
+            if (anterior != NULO && anterior < local_mejor) {
+                local_mejor = anterior;
+            }
+            if (posterior != NULO && posterior < local_mejor) {
+                local_mejor = posterior;
+            }
+        }
+    }
+
+    // BARRERA: Esperamos a que todos hayan leido antes de sobrescribir
+    __syncthreads();
+
+    // --- FASE 3: Sobrescribir en shared_data ---
+    // Volvemos a usar tid + 1 para mantener la coherencia de indices
+    shared_data[tid + 1] = local_mejor;
+
+    // BARRERA: Esperamos a que todos hayan escrito la nueva informacion
+    __syncthreads();
+
+    // --- FASE 4: Solo hilos pares comparan y atacan la global ---
+    if (idx < num_vuelos && tid % 2 == 0) {
+        int mi_valor = shared_data[tid + 1];
+
+        // Controlamos no leer fuera del bloque al mirar al vecino impar
+        int valor_siguiente = NULO;
+        if (idx + 1 < num_vuelos && (tid + 1) < blockDim.x) {
+            valor_siguiente = shared_data[tid + 2];
+        }
+
+        int mejor_final = mi_valor;
+
+        if (buscarMaximo) {
+            if (valor_siguiente != NULO && valor_siguiente > mejor_final) {
+                mejor_final = valor_siguiente;
+            }
+            if (mejor_final != NULO) {
+                atomicMax(d_res, mejor_final);
+            }
+        }
+        else {
+            if (valor_siguiente != NULO && valor_siguiente < mejor_final) {
+                mejor_final = valor_siguiente;
+            }
+            if (mejor_final != NULO) {
+                atomicMin(d_res, mejor_final);
+            }
+        }
+    }
+}
+
 
 
 
@@ -550,6 +661,10 @@ int main() {
                 columna_origen = &dataset.weather_delay;
             }
 
+            int variante;
+            cout << "Seleccione Variante (1=Simple, 2=Basica): ";
+            cin >> variante;
+
             // 4. Truncado de float a int (Exigencia del enunciado)
             int num_vuelos = (*columna_origen).size();
             vector<int> datos_int(num_vuelos);
@@ -589,9 +704,26 @@ int main() {
             cudaMemcpy(d_data, datos_int.data(), bytes_datos, cudaMemcpyHostToDevice);
             cudaMemcpy(d_res, &nulo_val, sizeof(int), cudaMemcpyHostToDevice); // Inicializamos el resultado al peor caso
 
-            // 7. Lanzar Kernel
-            cout << "Procesando...\n";
-            kernelFase03_Simple << <bloquesPorGrid, hilosPorBloque >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            // 8. Lanzamiento de Kernels
+            cout << "Procesando Variante " << variante << "...\n";
+
+            if (variante == 1) {
+                // Variante 3.1: Lanzamiento normal sin memoria compartida extra
+                kernelFase03_Simple << <bloquesPorGrid, hilosPorBloque >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            }
+            else if (variante == 2) {
+                // Variante 3.2: Calculamos los BYTES de Memoria Compartida
+                // Formula = (Cantidad de Hilos + 2 Huecos para Halos) * Tamaño de un Entero
+                size_t sharedMemBytes = (hilosPorBloque + 2) * sizeof(int);
+
+                cout << "[Memoria] Asignando " << sharedMemBytes << " bytes de Shared Memory por bloque.\n";
+
+                // ¡Fíjate en el TERCER parámetro dentro de los corchetes!
+                kernelFase03_Basica << <bloquesPorGrid, hilosPorBloque, sharedMemBytes >> > (d_data, num_vuelos, d_res, buscarMaximo);
+            }
+            else {
+                cout << "\n[Aviso] Variante no implementada aun.\n";
+            }
             cudaDeviceSynchronize();
 
             // 8. Traer resultado y mostrar
