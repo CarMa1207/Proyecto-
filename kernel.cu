@@ -103,16 +103,16 @@ bool cargarDatosCSV(const string& ruta, AirlineDataset& dataset) {
 
 // Kernel Fase 01: Detección de retrasos en despegues (DEP_DELAY)
 __global__ void kernelFase01(float* d_retrasos_despegue, int num_vuelos, int umbral_usuario) {
-  
+
     int id = blockIdx.x * blockDim.x + threadIdx.x;
 
- 
+
     if (id < num_vuelos) {
         float retraso_vuelo = d_retrasos_despegue[id];
 
         //  Ignoramos los valores nulos/vacíos (NAN)
         if (!isnan(retraso_vuelo)) {
-        
+
             if (umbral_usuario >= 0 && retraso_vuelo >= umbral_usuario) {
                 printf("- Hilo #%d: Retraso de %.0f minutos\n", id, retraso_vuelo);
             }
@@ -183,25 +183,25 @@ __global__ void kernelFase02(
 
 __global__ void kernelFase03_Simple(int* d_data, int num_vuelos, int* d_res, bool buscarMaximo) {
 
-       int id = blockIdx.x * blockDim.x + threadIdx.x;
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (id < num_vuelos) {
+    if (id < num_vuelos) {
 
-            int llave = d_data[id];
+        int llave = d_data[id];
 
-            if (buscarMaximo) {
-                if (llave != INT_MIN) {
-                    atomicMax(d_res, llave);
+        if (buscarMaximo) {
+            if (llave != INT_MIN) {
+                atomicMax(d_res, llave);
 
-                }
+            }
             else {
-                    if (llave != INT_MAX) {
-                        atomicMin(d_res, llave);
-                    }
+                if (llave != INT_MAX) {
+                    atomicMin(d_res, llave);
                 }
             }
-
         }
+
+    }
 
 
 }
@@ -350,7 +350,7 @@ __global__ void kernelFase03_Intermedia(int* d_data, int num_vuelos, int* d_res,
     __syncthreads();
 
     shared_data[tid + 1] = local_mejor;
-   
+
     __syncthreads();
 
     if (idx < num_vuelos && tid % 2 == 0) {
@@ -482,19 +482,19 @@ int main() {
             cout << "Transfiriendo " << num_vuelos << " registros a la GPU..." << endl;
             cudaMemcpy(d_dep_delay, dataset.dep_delay.data(), bytes, cudaMemcpyHostToDevice);
 
-            
+
             int hilosPorBloque = 256;
             int bloquesPorGrid = (num_vuelos + hilosPorBloque - 1) / hilosPorBloque;
 
             cout << "Lanzando Kernel: " << bloquesPorGrid << " bloques de " << hilosPorBloque << " hilos\n\n";
 
-           
+
             kernelFase01 << <bloquesPorGrid, hilosPorBloque >> > (d_dep_delay, num_vuelos, umbral);
 
-            
+
             cudaDeviceSynchronize();
 
-         
+
             cudaFree(d_dep_delay);
             break;
         }
@@ -589,7 +589,7 @@ int main() {
             // ejecutar kernel
             // ============================================
 
-            kernelFase02 <<<bloquesPorGrid, hilosPorBloque >>> (
+            kernelFase02 << <bloquesPorGrid, hilosPorBloque >> > (
                 d_arr_delay,
                 d_tail_nums,
                 num_vuelos,
@@ -704,8 +704,15 @@ int main() {
             }
 
             int variante;
-            cout << "Seleccione Variante (1=Simple, 2=Basica , 3=Intermedio): ";
-            cin >> variante;
+            do {
+                cout << "Seleccione Variante (1=Simple, 2=Basica, 3=Intermedio, 4=Reduccion): ";
+                cin >> variante;
+
+                if (variante < 1 || variante > 4) {
+                    cout << "Opcion no valida, intentelo de nuevo.\n";
+                }
+
+            } while (variante < 1 || variante > 4);
 
             // 4. Truncado de float a int (Exigencia del enunciado)
             int num_vuelos = (*columna_origen).size();
@@ -846,7 +853,7 @@ int main() {
             // 9. Limpiar
             cudaFree(d_data);
             cudaFree(d_res);
-            break; 
+            break;
         }
         case '4':
         {
